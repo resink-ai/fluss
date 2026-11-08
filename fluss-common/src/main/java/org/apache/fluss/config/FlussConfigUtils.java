@@ -24,7 +24,9 @@ import org.apache.fluss.fs.FsPath;
 
 import java.lang.reflect.Field;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -74,6 +76,18 @@ public class FlussConfigUtils {
 
     public static boolean isAlterableTableOption(String key) {
         return ALTERABLE_TABLE_OPTIONS.contains(key);
+    }
+
+    /**
+     * Returns every configured remote data directory: {@code remote.data.dirs}, or else the
+     * single {@code remote.data.dir}.
+     */
+    public static List<String> getConfiguredRemoteDataDirs(Configuration conf) {
+        List<String> remoteDataDirs = conf.get(ConfigOptions.REMOTE_DATA_DIRS);
+        if (!remoteDataDirs.isEmpty()) {
+            return new ArrayList<>(remoteDataDirs);
+        }
+        return Collections.singletonList(getDefaultRemoteDataDir(conf));
     }
 
     /**

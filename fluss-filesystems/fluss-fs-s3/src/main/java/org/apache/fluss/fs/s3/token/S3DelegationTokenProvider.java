@@ -19,7 +19,9 @@ package org.apache.fluss.fs.s3.token;
 
 import org.apache.fluss.annotation.VisibleForTesting;
 import org.apache.fluss.fs.token.CredentialsJsonSerde;
+import org.apache.fluss.fs.FsPath;
 import org.apache.fluss.fs.token.ObtainedSecurityToken;
+import org.apache.fluss.fs.token.TokenScope;
 import org.apache.fluss.utils.StringUtils;
 
 import org.apache.hadoop.conf.Configuration;
@@ -44,10 +46,17 @@ import javax.annotation.Nullable;
 
 import java.io.IOException;
 import java.net.URI;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 import static org.apache.fluss.utils.Preconditions.checkArgument;
 
@@ -67,6 +76,16 @@ public class S3DelegationTokenProvider {
     private static final String PATH_STYLE_ACCESS_KEY = "fs.s3a.path.style.access";
 
     private static final String ROLE_ARN_KEY = "fs.s3a.assumed.role.arn";
+
+    /**
+     * How a token limited to a path may list objects: {@code prefix} (default) allows listing only
+     * below the path using the standard {@code s3:prefix} condition; {@code none} allows no
+     * listing at all (reading a known file does not need it); {@code bucket} allows listing the
+     * whole bucket, which exposes other paths' object names but not their content. Stores that do
+     * not evaluate the {@code s3:prefix} condition (such as RustFS) deny every listing under {@code
+     * prefix}, so use {@code none} there.
+     */
+    public static final String SCOPED_LIST_MODE_KEY = "fs.s3a.scoped.token.list-mode";
     private static final String STS_ENDPOINT_KEY = "fs.s3a.assumed.role.sts.endpoint";
 
     private final String scheme;
@@ -75,6 +94,7 @@ public class S3DelegationTokenProvider {
     @Nullable private final String secretKey;
     @Nullable private final String roleArn;
     @Nullable private final String stsEndpoint;
+    private final ListMode listMode;
     @Nullable private final AWSCredentialProviderList credentialProviderList;
     private final Map<String, String> additionInfos;
 
@@ -86,6 +106,7 @@ public class S3DelegationTokenProvider {
         this.secretKey = conf.get(ACCESS_KEY_SECRET);
         this.roleArn = conf.get(ROLE_ARN_KEY);
         this.stsEndpoint = conf.get(STS_ENDPOINT_KEY);
+        this.listMode = ListMode.parse(conf.get(SCOPED_LIST_MODE_KEY, "prefix"));
         boolean hasCredentialProvider =
                 conf.getBoolean(CREDENTIAL_PROVIDER_EXPLICITLY_CONFIGURED, false)
                         && !StringUtils.isNullOrWhitespaceOnly(
@@ -153,6 +174,132 @@ public class S3DelegationTokenProvider {
                     credentials.expiration().toEpochMilli(),
                     additionInfos);
         }
+    }
+
+    /**
+     * Obtains credentials that reach only the directories of the scope. The limit is a session
+     * policy on an AssumeRole call, so it needs a role; with only GetSessionToken (which cannot
+     * carry a policy) the call fails instead of handing out credentials for the whole bucket.
+     */
+    public ObtainedSecurityToken obtainSecurityToken(TokenScope scope) {
+        checkArgument(
+                roleArn != null,
+                "Tokens limited to a path need '%s' to be set: GetSessionToken cannot carry a policy.",
+                ROLE_ARN_KEY);
+        checkArgument(!scope.isEmpty(), "The token scope is empty.");
+        String policy = buildScopePolicy(scope, listMode);
+        try (StsClient stsClient = buildStsClient()) {
+            LOG.info(
+                    "Obtaining scoped session credentials via AssumeRole, role: {}, scope: {}",
+                    roleArn,
+                    scope);
+            AssumeRoleResponse response =
+                    stsClient.assumeRole(
+                            AssumeRoleRequest.builder()
+                                    .roleArn(roleArn)
+                                    .roleSessionName("fluss-" + UUID.randomUUID())
+                                    .policy(policy)
+                                    .build());
+            Credentials credentials = response.credentials();
+            return new ObtainedSecurityToken(
+                    scheme,
+                    toJson(credentials),
+                    credentials.expiration().toEpochMilli(),
+                    additionInfos);
+        }
+    }
+
+    /** See {@link #SCOPED_LIST_MODE_KEY}. */
+    enum ListMode {
+        PREFIX,
+        NONE,
+        BUCKET;
+
+        static ListMode parse(String value) {
+            for (ListMode m : values()) {
+                if (m.name().equalsIgnoreCase(value.trim())) {
+                    return m;
+                }
+            }
+            throw new IllegalArgumentException(
+                    "Unknown value '" + value + "' for " + SCOPED_LIST_MODE_KEY
+                            + ", expected prefix, none or bucket.");
+        }
+    }
+
+    /** Builds the IAM session policy that allows exactly the directories of the scope. */
+    @VisibleForTesting
+    static String buildScopePolicy(TokenScope scope, ListMode listMode) {
+        List<String> statements = new ArrayList<>();
+        Set<String> buckets = new TreeSet<>();
+        Map<String, List<String>> listPrefixes = new TreeMap<>();
+        for (FsPath dir : scope.getReadWrite()) {
+            addObjectStatement(statements, dir, true, buckets, listPrefixes);
+        }
+        for (FsPath dir : scope.getReadOnly()) {
+            addObjectStatement(statements, dir, false, buckets, listPrefixes);
+        }
+        for (Map.Entry<String, List<String>> e : listMode == ListMode.NONE ? Collections.<String, List<String>>emptyMap().entrySet() : listPrefixes.entrySet()) {
+            StringBuilder prefixes = new StringBuilder();
+            for (String prefix : e.getValue()) {
+                if (prefixes.length() > 0) {
+                    prefixes.append(',');
+                }
+                // the directory itself and everything below it
+                prefixes.append('"').append(prefix).append("\",\"").append(prefix).append("/*\"");
+            }
+            String condition =
+                    listMode == ListMode.BUCKET
+                            ? ""
+                            : ",\"Condition\":{\"StringLike\":{\"s3:prefix\":[" + prefixes + "]}}";
+            statements.add(
+                    "{\"Effect\":\"Allow\",\"Action\":[\"s3:ListBucket\",\"s3:ListBucketMultipartUploads\"],"
+                            + "\"Resource\":\"arn:aws:s3:::"
+                            + e.getKey()
+                            + "\""
+                            + condition
+                            + "}");
+        }
+        statements.add(
+                "{\"Effect\":\"Allow\",\"Action\":\"s3:GetBucketLocation\",\"Resource\":["
+                        + String.join(
+                                ",",
+                                buckets.stream()
+                                        .map(b -> "\"arn:aws:s3:::" + b + "\"")
+                                        .collect(Collectors.toList()))
+                        + "]}");
+        return "{\"Version\":\"2012-10-17\",\"Statement\":[" + String.join(",", statements) + "]}";
+    }
+
+    private static void addObjectStatement(
+            List<String> statements,
+            FsPath dir,
+            boolean write,
+            Set<String> buckets,
+            Map<String, List<String>> listPrefixes) {
+        URI uri = dir.toUri();
+        String bucket = uri.getAuthority();
+        String key = uri.getPath() == null ? "" : uri.getPath().replaceAll("^/+|/+$", "");
+        checkArgument(bucket != null && !key.isEmpty(), "Not a directory below a bucket: %s", dir);
+        checkArgument(
+                key.indexOf('*') < 0 && key.indexOf('?') < 0 && key.indexOf('"') < 0,
+                "Illegal characters in scope directory: %s",
+                dir);
+        buckets.add(bucket);
+        listPrefixes.computeIfAbsent(bucket, b -> new ArrayList<>()).add(key);
+        String actions =
+                write
+                        ? "\"s3:GetObject\",\"s3:PutObject\",\"s3:DeleteObject\","
+                                + "\"s3:AbortMultipartUpload\",\"s3:ListMultipartUploadParts\""
+                        : "\"s3:GetObject\"";
+        statements.add(
+                "{\"Effect\":\"Allow\",\"Action\":["
+                        + actions
+                        + "],\"Resource\":\"arn:aws:s3:::"
+                        + bucket
+                        + "/"
+                        + key
+                        + "/*\"}");
     }
 
     @VisibleForTesting

@@ -96,6 +96,7 @@ import org.apache.flink.table.types.AbstractDataType;
 import javax.annotation.Nullable;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -682,7 +683,28 @@ public class FlinkCatalog extends AbstractCatalog {
         }
 
         try {
-            admin.alterTable(tablePath, flussTableChanges, ignoreIfNotExists).get();
+            // Fluss applies one kind of change per request. A single Flink change set can mix kinds
+            // (ALTER MATERIALIZED TABLE ... AS adds columns and rewrites the query), so send the
+            // kinds one after the other: schema first, so that a failure never leaves a new query
+            // on an old schema. The kinds are not applied atomically as a whole.
+            List<TableChange> schemaChanges = new ArrayList<>();
+            List<TableChange> distributionChanges = new ArrayList<>();
+            List<TableChange> propertyChanges = new ArrayList<>();
+            for (TableChange change : flussTableChanges) {
+                if (change instanceof TableChange.SchemaChange) {
+                    schemaChanges.add(change);
+                } else if (change instanceof TableChange.DistributionChange) {
+                    distributionChanges.add(change);
+                } else {
+                    propertyChanges.add(change);
+                }
+            }
+            for (List<TableChange> group :
+                    Arrays.asList(schemaChanges, distributionChanges, propertyChanges)) {
+                if (!group.isEmpty()) {
+                    admin.alterTable(tablePath, group, ignoreIfNotExists).get();
+                }
+            }
         } catch (Exception e) {
             Throwable t = ExceptionUtils.stripExecutionException(e);
             if (CatalogExceptionUtils.isTableNotExist(t)) {

@@ -137,4 +137,19 @@ public class CatalogMaterializedTableAdapter {
     public static Optional<TableDistribution> getDistribution(CatalogMaterializedTable mt) {
         return mt.getDistribution();
     }
+
+    /** Whether the change is the one behind ALTER MATERIALIZED TABLE ... AS. */
+    public static boolean isModifyDefinitionQuery(Object change) {
+        return change instanceof org.apache.flink.table.catalog.TableChange.ModifyDefinitionQuery;
+    }
+
+    public static String getChangedDefinitionQuery(Object change) {
+        return ((org.apache.flink.table.catalog.TableChange.ModifyDefinitionQuery) change)
+                .getDefinitionQuery();
+    }
+
+    public static String getChangedOriginalQuery(Object change) {
+        return ((org.apache.flink.table.catalog.TableChange.ModifyDefinitionQuery) change)
+                .getOriginalQuery();
+    }
 }

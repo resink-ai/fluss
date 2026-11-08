@@ -19,6 +19,7 @@ package org.apache.fluss.fs;
 
 import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.fs.token.ObtainedSecurityToken;
+import org.apache.fluss.fs.token.TokenScope;
 import org.apache.fluss.utils.WrappingProxy;
 
 import java.io.IOException;
@@ -53,6 +54,11 @@ public class SafetyNetWrapperFileSystem extends FileSystem implements WrappingPr
     @Override
     public ObtainedSecurityToken obtainSecurityToken() throws IOException {
         return unsafeFileSystem.obtainSecurityToken();
+    }
+
+    @Override
+    public ObtainedSecurityToken obtainSecurityToken(TokenScope scope) throws IOException {
+        return unsafeFileSystem.obtainSecurityToken(scope);
     }
 
     @Override

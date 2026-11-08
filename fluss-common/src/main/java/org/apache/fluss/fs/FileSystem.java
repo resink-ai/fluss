@@ -23,6 +23,7 @@ import org.apache.fluss.exception.IllegalConfigurationException;
 import org.apache.fluss.fs.local.LocalFileSystem;
 import org.apache.fluss.fs.local.LocalFileSystemPlugin;
 import org.apache.fluss.fs.token.ObtainedSecurityToken;
+import org.apache.fluss.fs.token.TokenScope;
 import org.apache.fluss.plugin.PluginManager;
 import org.apache.fluss.shaded.guava32.com.google.common.collect.ImmutableMultimap;
 import org.apache.fluss.shaded.guava32.com.google.common.collect.Iterators;
@@ -437,6 +438,22 @@ public abstract class FileSystem {
      * @return a map contains the necessary info about the security token.
      */
     public abstract ObtainedSecurityToken obtainSecurityToken() throws IOException;
+
+    /**
+     * Obtain a security token that only reaches the given directories.
+     *
+     * <p>File systems that cannot limit a token to a path do not override this, and the call
+     * fails: a caller asking for a limited token must never silently get an unlimited one.
+     *
+     * @param scope the directories the token may reach
+     * @throws UnsupportedOperationException if the file system cannot scope tokens
+     */
+    public ObtainedSecurityToken obtainSecurityToken(TokenScope scope) throws IOException {
+        throw new UnsupportedOperationException(
+                "The file system for scheme '"
+                        + getUri().getScheme()
+                        + "' cannot issue security tokens limited to a path.");
+    }
 
     /**
      * Returns a URI whose scheme and authority identify this file system.

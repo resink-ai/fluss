@@ -493,7 +493,8 @@ public class FlinkConversions {
                 instanceof org.apache.flink.table.catalog.TableChange.DropWatermark) {
             return convertDropWatermark();
         } else if (tableChange instanceof ModifyRefreshStatus
-                || tableChange instanceof ModifyRefreshHandler) {
+                || tableChange instanceof ModifyRefreshHandler
+                || CatalogMaterializedTableAdapter.isModifyDefinitionQuery(tableChange)) {
             // MaterializedTableChange may produce multiple fluss TableChange.
             return convertMaterializedTableChange(tableChange);
         } else {
@@ -568,6 +569,9 @@ public class FlinkConversions {
         } else if (materializedTableChange instanceof ModifyRefreshHandler) {
             convertModifyRefreshHandler(
                     (ModifyRefreshHandler) materializedTableChange, flussTableChanges);
+        } else if (CatalogMaterializedTableAdapter.isModifyDefinitionQuery(
+                materializedTableChange)) {
+            convertModifyDefinitionQuery(materializedTableChange, flussTableChanges);
         } else {
             throw new UnsupportedOperationException(
                     String.format(
@@ -576,6 +580,27 @@ public class FlinkConversions {
         }
 
         return flussTableChanges;
+    }
+
+    /**
+     * Handles {@code ModifyDefinitionQuery}, the change behind {@code ALTER MATERIALIZED TABLE ...
+     * AS}. Flink hands over the expanded query as the definition query, and the query as written by
+     * the user as the original query; both are stored the same way as at creation.
+     */
+    private static void convertModifyDefinitionQuery(
+            Object modifyDefinitionQuery, List<TableChange> flussTableChanges) {
+        String expandedQuery =
+                CatalogMaterializedTableAdapter.getChangedDefinitionQuery(modifyDefinitionQuery);
+        flussTableChanges.add(
+                TableChange.set(MATERIALIZED_TABLE_DEFINITION_QUERY.key(), expandedQuery));
+        flussTableChanges.add(
+                TableChange.set(MATERIALIZED_TABLE_EXPANDED_QUERY.key(), expandedQuery));
+        String originalQuery =
+                CatalogMaterializedTableAdapter.getChangedOriginalQuery(modifyDefinitionQuery);
+        if (originalQuery != null) {
+            flussTableChanges.add(
+                    TableChange.set(MATERIALIZED_TABLE_ORIGINAL_QUERY.key(), originalQuery));
+        }
     }
 
     /** Handles {@code ModifyRefreshStatus} change. */

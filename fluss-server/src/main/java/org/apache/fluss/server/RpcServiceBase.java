@@ -21,6 +21,7 @@ import org.apache.fluss.annotation.VisibleForTesting;
 import org.apache.fluss.cluster.ServerNode;
 import org.apache.fluss.cluster.ServerType;
 import org.apache.fluss.config.cluster.ConfigEntry;
+import org.apache.fluss.exception.AuthorizationException;
 import org.apache.fluss.exception.FlussRuntimeException;
 import org.apache.fluss.exception.KvSnapshotNotExistException;
 import org.apache.fluss.exception.LakeTableSnapshotNotExistException;
@@ -31,7 +32,9 @@ import org.apache.fluss.exception.SecurityTokenException;
 import org.apache.fluss.exception.TableNotPartitionedException;
 import org.apache.fluss.exception.UnsupportedVersionException;
 import org.apache.fluss.fs.FileSystem;
+import org.apache.fluss.fs.FsPath;
 import org.apache.fluss.fs.token.ObtainedSecurityToken;
+import org.apache.fluss.fs.token.TokenScope;
 import org.apache.fluss.metadata.DatabaseInfo;
 import org.apache.fluss.metadata.PhysicalTablePath;
 import org.apache.fluss.metadata.ResolvedPartitionSpec;
@@ -108,15 +111,18 @@ import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.stream.Collectors;
@@ -159,6 +165,8 @@ public abstract class RpcServiceBase extends RpcGatewayService implements AdminR
 
     private long tokenLastUpdateTimeMs = 0;
     private ObtainedSecurityToken securityToken = null;
+    private final Map<String, CachedToken> scopedTokens = new HashMap<>();
+    private volatile List<String> remoteDataDirs = new ArrayList<>();
 
     private final ExecutorService ioExecutor;
 
@@ -599,25 +607,111 @@ public abstract class RpcServiceBase extends RpcGatewayService implements AdminR
         }
     }
 
+    /**
+     * Sets the remote data directories. With an authorizer configured, only callers that are
+     * authorized on the whole cluster get a token for all of them; everybody else gets a token that
+     * reaches only the directories of the databases they may read (and write). Without these
+     * directories such callers get no token at all.
+     */
+    public void setRemoteDataDirs(List<String> remoteDataDirs) {
+        this.remoteDataDirs = new ArrayList<>(remoteDataDirs);
+    }
+
     @Override
     public CompletableFuture<GetFileSystemSecurityTokenResponse> getFileSystemSecurityToken(
             GetFileSystemSecurityTokenRequest request) {
-        // TODO: add ACL for per-table in https://github.com/apache/fluss/issues/752
         try {
-            // In order to avoid repeatedly obtaining security token, cache it for a while.
-            long currentTimeMs = System.currentTimeMillis();
-            if (securityToken == null
-                    || currentTimeMs - tokenLastUpdateTimeMs > TOKEN_EXPIRATION_TIME_MS) {
-                securityToken = remoteFileSystem.obtainSecurityToken();
-                tokenLastUpdateTimeMs = currentTimeMs;
-            }
-
+            ObtainedSecurityToken token =
+                    authorizer == null ? sharedSecurityToken() : scopedSecurityToken();
             return CompletableFuture.completedFuture(
                     toGetFileSystemSecurityTokenResponse(
-                            remoteFileSystem.getUri().getScheme(), securityToken));
+                            remoteFileSystem.getUri().getScheme(), token));
+        } catch (AuthorizationException e) {
+            throw e;
         } catch (Exception e) {
             throw new SecurityTokenException(
                     "Failed to get file access security token: " + e.getMessage(), e);
+        }
+    }
+
+    /** The one token of the whole remote file system, cached for a while (no authorization). */
+    private synchronized ObtainedSecurityToken sharedSecurityToken() throws IOException {
+        // In order to avoid repeatedly obtaining security token, cache it for a while.
+        long currentTimeMs = System.currentTimeMillis();
+        if (securityToken == null
+                || currentTimeMs - tokenLastUpdateTimeMs > TOKEN_EXPIRATION_TIME_MS) {
+            securityToken = remoteFileSystem.obtainSecurityToken();
+            tokenLastUpdateTimeMs = currentTimeMs;
+        }
+        return securityToken;
+    }
+
+    /**
+     * A token limited to what the caller may access. A caller authorized for everything on the
+     * cluster (a super user) gets the shared token. Anyone else gets a token for the directories of
+     * the databases they may read, writable where they may write. The file system must be able to
+     * limit tokens to a path; if it cannot, the call fails rather than hand out the shared token.
+     */
+    private ObtainedSecurityToken scopedSecurityToken() throws IOException {
+        Session session = currentSession();
+        if (authorizer.isAuthorized(session, OperationType.ALL, Resource.cluster())) {
+            return sharedSecurityToken();
+        }
+
+        List<Resource> databases = new ArrayList<>();
+        for (String database : metadataManager.listDatabases()) {
+            databases.add(Resource.database(database));
+        }
+        Set<String> writable = new TreeSet<>();
+        for (Resource r : authorizer.filterByAuthorized(session, OperationType.WRITE, databases)) {
+            writable.add(r.getName());
+        }
+        Set<String> readable = new TreeSet<>();
+        for (Resource r : authorizer.filterByAuthorized(session, OperationType.READ, databases)) {
+            readable.add(r.getName());
+        }
+        readable.removeAll(writable);
+        List<FsPath> readOnly = databaseDirs(readable);
+        List<FsPath> readWrite = databaseDirs(writable);
+        TokenScope scope = new TokenScope(readOnly, readWrite);
+        if (scope.isEmpty()) {
+            throw new AuthorizationException(
+                    "No authorization to read or write any database, so no file access token is issued.");
+        }
+
+        String key = scope.cacheKey();
+        long now = System.currentTimeMillis();
+        synchronized (scopedTokens) {
+            scopedTokens.values().removeIf(c -> now - c.obtainedAtMs > TOKEN_EXPIRATION_TIME_MS);
+            CachedToken cached = scopedTokens.get(key);
+            if (cached == null) {
+                cached = new CachedToken(remoteFileSystem.obtainSecurityToken(scope), now);
+                scopedTokens.put(key, cached);
+            }
+            return cached.token;
+        }
+    }
+
+    /** The remote kv and log directories of the databases, under every remote data directory. */
+    private List<FsPath> databaseDirs(Set<String> databases) {
+        List<FsPath> dirs = new ArrayList<>();
+        for (String database : databases) {
+            for (String root : remoteDataDirs) {
+                for (String kind : new String[] {"kv", "log"}) {
+                    dirs.add(new FsPath(new FsPath(root, kind), database));
+                }
+            }
+        }
+        return dirs;
+    }
+
+    private static final class CachedToken {
+        final ObtainedSecurityToken token;
+        final long obtainedAtMs;
+
+        CachedToken(ObtainedSecurityToken token, long obtainedAtMs) {
+            this.token = token;
+            this.obtainedAtMs = obtainedAtMs;
         }
     }
 
