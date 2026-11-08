@@ -21,6 +21,7 @@ import org.apache.fluss.fs.FileSystem;
 import org.apache.fluss.fs.hdfs.HadoopFileSystem;
 import org.apache.fluss.fs.s3.token.S3DelegationTokenProvider;
 import org.apache.fluss.fs.token.ObtainedSecurityToken;
+import org.apache.fluss.fs.token.TokenScope;
 
 import org.apache.hadoop.conf.Configuration;
 
@@ -55,6 +56,11 @@ public class S3FileSystem extends HadoopFileSystem {
 
     @Override
     public ObtainedSecurityToken obtainSecurityToken() throws IOException {
+        obtainSecurityTokenProvider();
+        return s3DelegationTokenProvider.obtainSecurityToken();
+    }
+
+    private void obtainSecurityTokenProvider() throws IOException {
         if (s3DelegationTokenProvider == null) {
             synchronized (this) {
                 if (s3DelegationTokenProvider == null) {
@@ -62,6 +68,11 @@ public class S3FileSystem extends HadoopFileSystem {
                 }
             }
         }
-        return s3DelegationTokenProvider.obtainSecurityToken();
+    }
+
+    @Override
+    public ObtainedSecurityToken obtainSecurityToken(TokenScope scope) throws IOException {
+        obtainSecurityTokenProvider();
+        return s3DelegationTokenProvider.obtainSecurityToken(scope);
     }
 }

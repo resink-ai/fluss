@@ -21,6 +21,7 @@ import org.apache.fluss.annotation.VisibleForTesting;
 import org.apache.fluss.cluster.Endpoint;
 import org.apache.fluss.cluster.ServerType;
 import org.apache.fluss.config.ConfigOptions;
+import org.apache.fluss.config.FlussConfigUtils;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.metadata.TableBucket;
 import org.apache.fluss.metrics.registry.MetricRegistry;
@@ -333,6 +334,7 @@ public class TabletServer extends ServerBase {
                             coordinatorGateway,
                             interListenerName,
                             groupManager);
+            tabletService.setRemoteDataDirs(FlussConfigUtils.getConfiguredRemoteDataDirs(conf));
 
             RequestsMetrics requestsMetrics =
                     RequestsMetrics.createTabletServerRequestMetrics(tabletServerMetricGroup);

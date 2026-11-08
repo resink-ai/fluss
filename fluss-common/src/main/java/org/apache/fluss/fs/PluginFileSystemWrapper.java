@@ -19,6 +19,7 @@ package org.apache.fluss.fs;
 
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.fs.token.ObtainedSecurityToken;
+import org.apache.fluss.fs.token.TokenScope;
 import org.apache.fluss.utils.TemporaryClassLoaderContext;
 import org.apache.fluss.utils.WrappingProxy;
 
@@ -73,6 +74,11 @@ public class PluginFileSystemWrapper implements FileSystemPlugin {
         @Override
         public ObtainedSecurityToken obtainSecurityToken() throws IOException {
             return inner.obtainSecurityToken();
+        }
+
+        @Override
+        public ObtainedSecurityToken obtainSecurityToken(TokenScope scope) throws IOException {
+            return inner.obtainSecurityToken(scope);
         }
 
         @Override

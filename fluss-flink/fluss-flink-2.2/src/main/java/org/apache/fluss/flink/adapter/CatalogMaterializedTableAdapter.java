@@ -134,4 +134,17 @@ public class CatalogMaterializedTableAdapter {
     public static Optional<TableDistribution> getDistribution(CatalogMaterializedTable mt) {
         return mt.getDistribution();
     }
+
+    /** Whether the change is the one behind ALTER MATERIALIZED TABLE ... AS (Flink 2.3+). */
+    public static boolean isModifyDefinitionQuery(Object change) {
+        return false;
+    }
+
+    public static String getChangedDefinitionQuery(Object change) {
+        throw new UnsupportedOperationException("ModifyDefinitionQuery needs Flink 2.3+");
+    }
+
+    public static String getChangedOriginalQuery(Object change) {
+        throw new UnsupportedOperationException("ModifyDefinitionQuery needs Flink 2.3+");
+    }
 }

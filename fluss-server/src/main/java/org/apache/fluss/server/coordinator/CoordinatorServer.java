@@ -295,6 +295,7 @@ public class CoordinatorServer extends ServerBase {
                             kvSnapshotLeaseManager,
                             coordinatorLeaderElection,
                             replicaCapacityController);
+            coordinatorService.setRemoteDataDirs(FlussConfigUtils.getConfiguredRemoteDataDirs(conf));
 
             this.rpcServer =
                     RpcServer.create(
