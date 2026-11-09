@@ -24,6 +24,8 @@ import org.apache.fluss.fs.token.SecurityTokenReceiver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.Nullable;
+
 import java.util.HashMap;
 import java.util.Map;
 import java.util.ServiceLoader;
@@ -77,6 +79,11 @@ class SecurityTokenReceiverRepository {
      *     SecurityTokenReceiver} based on scheme name.
      */
     void onNewTokensObtained(ObtainedSecurityToken token) {
+        onNewTokensObtained(null, token);
+    }
+
+    /** Same, for the token of one client connection; null means the JVM-wide token. */
+    void onNewTokensObtained(@Nullable String owner, ObtainedSecurityToken token) {
         String schemeName = token.getScheme();
         LOG.info("New security tokens arrived, sending them to receiver");
         if (!securityTokenReceivers.containsKey(schemeName)) {
@@ -84,10 +91,26 @@ class SecurityTokenReceiverRepository {
                     "Token arrived for service but no receiver found for it: " + schemeName);
         }
         try {
-            securityTokenReceivers.get(schemeName).onNewTokensObtained(token);
+            SecurityTokenReceiver receiver = securityTokenReceivers.get(schemeName);
+            if (owner == null) {
+                receiver.onNewTokensObtained(token);
+            } else {
+                receiver.onNewTokensObtained(owner, token);
+            }
         } catch (Exception e) {
             LOG.warn("Failed to send token to security token receiver {}", schemeName, e);
         }
         LOG.info("Security token sent to receiver");
+    }
+
+    /** The client connection is closed: receivers drop what they kept for it. */
+    void onOwnerClosed(String owner) {
+        for (SecurityTokenReceiver receiver : securityTokenReceivers.values()) {
+            try {
+                receiver.onOwnerClosed(owner);
+            } catch (Exception e) {
+                LOG.warn("Failed to release the token of a closed connection", e);
+            }
+        }
     }
 }

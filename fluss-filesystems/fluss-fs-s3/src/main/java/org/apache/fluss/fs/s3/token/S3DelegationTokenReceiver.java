@@ -21,12 +21,14 @@ import org.apache.fluss.fs.token.Credentials;
 import org.apache.fluss.fs.token.CredentialsJsonSerde;
 import org.apache.fluss.fs.token.ObtainedSecurityToken;
 import org.apache.fluss.fs.token.SecurityTokenReceiver;
+import org.apache.fluss.fs.token.TokenOwner;
 
 import org.apache.hadoop.fs.s3a.auth.NoAwsCredentialsException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /* This file is based on source code of Apache Flink Project (https://flink.apache.org/), licensed by the Apache
  * Software Foundation (ASF) under the Apache License, Version 2.0. See the NOTICE file distributed with this work for
@@ -39,8 +41,13 @@ public class S3DelegationTokenReceiver implements SecurityTokenReceiver {
 
     private static final Logger LOG = LoggerFactory.getLogger(S3DelegationTokenReceiver.class);
 
+    /** The latest token received for any connection: used by threads not bound to a connection. */
     static volatile Credentials credentials;
+
     static volatile Map<String, String> additionInfos;
+
+    /** The token of each client connection in this JVM, by {@link TokenOwner}. */
+    private static final Map<String, Credentials> CREDENTIALS_BY_OWNER = new ConcurrentHashMap<>();
 
     public static void updateHadoopConfig(org.apache.hadoop.conf.Configuration hadoopConfig) {
         LOG.info("Updating Hadoop configuration");
@@ -92,7 +99,24 @@ public class S3DelegationTokenReceiver implements SecurityTokenReceiver {
                 S3TokenLogUtils.maskAccessKey(credentials.getAccessKeyId()));
     }
 
+    @Override
+    public void onNewTokensObtained(String owner, ObtainedSecurityToken token) {
+        onNewTokensObtained(token);
+        CREDENTIALS_BY_OWNER.put(owner, CredentialsJsonSerde.fromJson(token.getToken()));
+    }
+
+    @Override
+    public void onOwnerClosed(String owner) {
+        CREDENTIALS_BY_OWNER.remove(owner);
+    }
+
+    /**
+     * The credentials for the calling thread. A thread bound to a connection gets that connection's
+     * token, or none: it never falls back to another connection's. Other threads get the latest
+     * token received.
+     */
     public static Credentials getCredentials() {
-        return credentials;
+        String owner = TokenOwner.current();
+        return owner == null ? credentials : CREDENTIALS_BY_OWNER.get(owner);
     }
 }

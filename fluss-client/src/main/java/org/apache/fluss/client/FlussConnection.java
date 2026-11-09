@@ -48,6 +48,7 @@ import java.time.Duration;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.UUID;
 
 import static org.apache.fluss.client.utils.MetadataUtils.getOneAvailableTabletServerNode;
 import static org.apache.fluss.config.FlussConfigUtils.CLIENT_PREFIX;
@@ -65,6 +66,8 @@ public final class FlussConnection implements Connection {
     private volatile LookupClient lookupClient;
     private volatile RemoteFileDownloader remoteFileDownloader;
     private volatile SecurityTokenManager securityTokenManager;
+    // Names this connection's file system token, so connections in one JVM do not share it.
+    private final String tokenOwner = UUID.randomUUID().toString();
     private volatile Admin admin;
 
     FlussConnection(Configuration conf) {
@@ -164,7 +167,8 @@ public final class FlussConnection implements Connection {
                 if (remoteFileDownloader == null) {
                     remoteFileDownloader =
                             new RemoteFileDownloader(
-                                    conf.getInt(ConfigOptions.REMOTE_FILE_DOWNLOAD_THREAD_NUM));
+                                    conf.getInt(ConfigOptions.REMOTE_FILE_DOWNLOAD_THREAD_NUM),
+                                    tokenOwner);
                 }
                 // access remote files requires setting up filesystem security token manager
                 if (securityTokenManager == null) {
@@ -189,7 +193,8 @@ public final class FlussConnection implements Connection {
                     SecurityTokenProvider securityTokenProvider =
                             new DefaultSecurityTokenProvider(gateway);
                     securityTokenManager =
-                            new DefaultSecurityTokenManager(conf, securityTokenProvider);
+                            new DefaultSecurityTokenManager(
+                                    conf, securityTokenProvider, tokenOwner);
                     try {
                         securityTokenManager.start();
                     } catch (Exception e) {
