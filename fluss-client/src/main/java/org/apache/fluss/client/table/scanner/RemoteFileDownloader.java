@@ -20,6 +20,7 @@ package org.apache.fluss.client.table.scanner;
 import org.apache.fluss.fs.FSDataInputStream;
 import org.apache.fluss.fs.FileSystem;
 import org.apache.fluss.fs.FsPath;
+import org.apache.fluss.fs.token.TokenOwner;
 import org.apache.fluss.fs.FsPathAndFileName;
 import org.apache.fluss.fs.utils.FileDownloadSpec;
 import org.apache.fluss.fs.utils.FileDownloadUtils;
@@ -27,6 +28,8 @@ import org.apache.fluss.utils.CloseableRegistry;
 import org.apache.fluss.utils.FileUtils;
 import org.apache.fluss.utils.IOUtils;
 import org.apache.fluss.utils.concurrent.ExecutorThreadFactory;
+
+import javax.annotation.Nullable;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -38,6 +41,7 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
 
 /**
  * The downloader that has a IO thread pool to download the remote files (like kv snapshots files,
@@ -48,16 +52,25 @@ public class RemoteFileDownloader implements Closeable {
     protected final ExecutorService downloadThreadPool;
 
     public RemoteFileDownloader(int threadNum) {
-        downloadThreadPool =
-                Executors.newFixedThreadPool(
-                        threadNum,
-                        new ExecutorThreadFactory(
+        this(threadNum, null);
+    }
+
+    /**
+     * @param tokenOwner the connection these downloads are made for. The download threads read with
+     *     that connection's file system security token, not one shared by the whole JVM.
+     */
+    public RemoteFileDownloader(int threadNum, @Nullable String tokenOwner) {
+        ThreadFactory threads =
+                new ExecutorThreadFactory(
                                 "fluss-client-remote-file-downloader",
                                 // use the current classloader of the current thread as the given
                                 // classloader of the thread created by the ExecutorThreadFactory
                                 // to avoid use weird classloader provided by
                                 // CompletableFuture.runAsync of method #initReaderAsynchronously
-                                Thread.currentThread().getContextClassLoader()));
+                                Thread.currentThread().getContextClassLoader());
+        downloadThreadPool =
+                Executors.newFixedThreadPool(
+                        threadNum, task -> threads.newThread(TokenOwner.bind(tokenOwner, task)));
     }
 
     /**

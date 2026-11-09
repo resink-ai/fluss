@@ -15,7 +15,6 @@
  * limitations under the License.
  */
 
-
 package org.apache.fluss.fs.token;
 
 import org.apache.fluss.fs.FsPath;

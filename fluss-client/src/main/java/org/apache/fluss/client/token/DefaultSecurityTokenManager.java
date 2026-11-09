@@ -68,8 +68,23 @@ public class DefaultSecurityTokenManager implements SecurityTokenManager {
     @Nullable
     private ScheduledFuture<?> tokensUpdateFuture;
 
+    /** Null for the JVM-wide token (the behaviour before tokens were kept per connection). */
+    @Nullable private final String owner;
+
     public DefaultSecurityTokenManager(
             Configuration configuration, SecurityTokenProvider securityTokenProvider) {
+        this(configuration, securityTokenProvider, null);
+    }
+
+    /**
+     * @param owner identifies the client connection; its file readers must be bound to the same id
+     *     with {@link org.apache.fluss.fs.token.TokenOwner}
+     */
+    public DefaultSecurityTokenManager(
+            Configuration configuration,
+            SecurityTokenProvider securityTokenProvider,
+            @Nullable String owner) {
+        this.owner = owner;
         this.securityTokenProvider = securityTokenProvider;
         this.tokensRenewalTimeRatio =
                 configuration.get(FILESYSTEM_SECURITY_TOKEN_RENEWAL_TIME_RATIO);
@@ -99,7 +114,7 @@ public class DefaultSecurityTokenManager implements SecurityTokenManager {
             Optional<Long> nextRenewal = obtainSecurityTokensAndGetNextRenewal(tokenContainer);
 
             if (tokenContainer.get() != null) {
-                securityTokenReceiverRepository.onNewTokensObtained(tokenContainer.get());
+                securityTokenReceiverRepository.onNewTokensObtained(owner, tokenContainer.get());
             } else {
                 LOG.warn("No tokens obtained so skipping notifications");
             }
@@ -179,6 +194,9 @@ public class DefaultSecurityTokenManager implements SecurityTokenManager {
         stopTokensUpdate();
 
         scheduledExecutor.shutdownNow();
+        if (owner != null) {
+            securityTokenReceiverRepository.onOwnerClosed(owner);
+        }
 
         LOG.info("Stopped security token renewal");
     }

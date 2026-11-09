@@ -32,4 +32,19 @@ public interface SecurityTokenReceiver {
      * @param token security token obtained
      */
     void onNewTokensObtained(ObtainedSecurityToken token) throws Exception;
+
+    /**
+     * Callback function when new security tokens obtained for one client connection. Receivers that
+     * can keep the tokens of several connections apart override this and use {@link
+     * TokenOwner#current()} when they read; the default keeps one token for the whole JVM.
+     *
+     * @param owner the connection the token belongs to
+     * @param token security token obtained
+     */
+    default void onNewTokensObtained(String owner, ObtainedSecurityToken token) throws Exception {
+        onNewTokensObtained(token);
+    }
+
+    /** The connection is closed; forget what was kept for it. */
+    default void onOwnerClosed(String owner) {}
 }
